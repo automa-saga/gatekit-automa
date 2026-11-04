@@ -1,6 +1,17 @@
 {
   "plugins": [
-    "@semantic-release/commit-analyzer",
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          {
+            "breaking": true,
+            "release": "minor"
+          }
+        ]
+      }
+    ],
     [
       "@semantic-release/release-notes-generator",
       {
@@ -8,12 +19,6 @@
       }
     ],
     "@semantic-release/github"
-  ],
-  "releaseRules": [
-    {
-      "breaking": true,
-      "release": "minor"
-    }
   ],
   "branches": [
     {
@@ -26,11 +31,6 @@
     },
     {
       "name": "alpha/*",
-      "prerelease": "alpha",
-      "channel": "alpha"
-    },
-    {
-      "name": "ci/*",
       "prerelease": "alpha",
       "channel": "alpha"
     },
