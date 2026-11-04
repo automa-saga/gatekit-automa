@@ -1,0 +1,15 @@
+module github.com/automa-saga/gatekit-automa
+
+go 1.26.9
+
+require (
+	github.com/automa-saga/automa v1.1.0
+	github.com/automa-saga/gatekit v0.1.1-0.20261104052439-ffeafc18b6ce
+)
+
+require (
+	github.com/joomcode/errorx v1.2.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

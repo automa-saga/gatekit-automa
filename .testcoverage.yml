@@ -1,0 +1,20 @@
+# Path to coverage profile file (output of `go test -coverprofile`).
+profile: cover.out
+
+# Coverage thresholds (percentages, [0-100]).
+threshold:
+  file: 60
+  package: 80
+  total: 80
+
+# Per-path threshold overrides (most specific first).
+override: []
+
+# Paths excluded from coverage statistics.
+exclude:
+  paths: []
+
+breakdown-file-name: ''
+
+diff:
+  base-breakdown-file-name: ''
