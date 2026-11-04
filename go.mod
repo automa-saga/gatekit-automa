@@ -1,6 +1,6 @@
 module github.com/automa-saga/gatekit-automa
 
-go 1.26.9
+go 1.27.3
 
 require (
 	github.com/automa-saga/automa v1.1.0
