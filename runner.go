@@ -65,7 +65,7 @@ func NewRunner(opts ...Option) *Runner {
 // Runner satisfies migration.Runner.
 var _ migration.Runner = (*Runner)(nil)
 
-// RunNow executes the plan's run-now (host-local) steps as an automa saga, rolling
+// RunNow executes the plan's run-now (local) steps as an automa saga, rolling
 // back completed steps in reverse on failure. It does not advance the active
 // version. With a journal it is crash-resumable. An empty run-now set is a no-op.
 func (r *Runner) RunNow(ctx context.Context, plan migration.Plan) error {
@@ -75,10 +75,10 @@ func (r *Runner) RunNow(ctx context.Context, plan migration.Plan) error {
 	return r.run(ctx, RunNowWorkflow(plan))
 }
 
-// Finalize runs the plan's held (interop) steps as an automa saga, then advances
+// Finalize runs the plan's run-at-finalize (shared) steps as an automa saga, then advances
 // the active version to plan.To via store as the terminal step. The advance lands
-// only if every held step succeeds (the one-way line); a failure compensates the
-// executed held steps and leaves the active version unchanged. With a journal it is
+// only if every run-at-finalize step succeeds (the one-way line); a failure compensates the
+// executed run-at-finalize steps and leaves the active version unchanged. With a journal it is
 // crash-resumable.
 func (r *Runner) Finalize(ctx context.Context, plan migration.Plan, store migration.Store) error {
 	return r.run(ctx, FinalizeWorkflow(plan, store))
@@ -101,7 +101,7 @@ func (r *Runner) run(ctx context.Context, wb *automa.WorkflowBuilder) error {
 	return nil
 }
 
-// RunNowWorkflow builds the automa workflow for the plan's run-now (host-local)
+// RunNowWorkflow builds the automa workflow for the plan's run-now (local)
 // steps: each migration's Execute is the step action and Rollback its compensation,
 // in plan order, with reverse-order rollback on failure. It is the building block
 // the consumer may run directly (with automa's execution modes, notifications, and
@@ -110,12 +110,12 @@ func RunNowWorkflow(plan migration.Plan) *automa.WorkflowBuilder {
 	return workflowOf(runNowWorkflowID, stepsOf(plan.RunNow()))
 }
 
-// FinalizeWorkflow builds the automa workflow for the plan's held (interop) steps
+// FinalizeWorkflow builds the automa workflow for the plan's run-at-finalize (shared) steps
 // followed by a terminal step that advances the active version to plan.To via
-// store. If any held step fails, the workflow compensates and the advance never
+// store. If any run-at-finalize step fails, the workflow compensates and the advance never
 // runs, so the active version is unchanged.
 func FinalizeWorkflow(plan migration.Plan, store migration.Store) *automa.WorkflowBuilder {
-	steps := stepsOf(plan.Held())
+	steps := stepsOf(plan.RunAtFinalize())
 	steps = append(steps, advanceStep(plan, store))
 	return workflowOf(finalizeWorkflowID, steps)
 }
@@ -162,7 +162,7 @@ func stepFor(m migration.Migration) *automa.StepBuilder {
 
 // advanceStep is the terminal finalize step that persists the new active version.
 // It has no compensation: advancing is the one-way line, and if it fails the
-// already-run held steps are compensated by the workflow.
+// already-run run-at-finalize steps are compensated by the workflow.
 func advanceStep(plan migration.Plan, store migration.Store) *automa.StepBuilder {
 	return automa.NewStepBuilder().
 		WithId(advanceStepID).

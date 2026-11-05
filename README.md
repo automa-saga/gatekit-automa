@@ -33,8 +33,8 @@ plan, _ := migration.NewPlanner(migs...).Plan(ctx, store.Current(), target)
 // Durable: journals progress and resumes after a crash.
 runner := gkautoma.NewRunner(gkautoma.WithJournal("/var/lib/app/finalize.journal"))
 
-_ = runner.RunNow(ctx, plan)          // host-local steps, at install
-_ = runner.Finalize(ctx, plan, store) // interop steps, then advance active — crash-safe
+_ = runner.RunNow(ctx, plan)          // local steps, at install
+_ = runner.Finalize(ctx, plan, store) // shared steps, then advance active — crash-safe
 ```
 
 `Runner` implements `migration.Runner`, so it is a drop-in replacement for
@@ -45,9 +45,9 @@ notifications, and journal.
 
 - **Compensation** — steps run in plan order; the first failure compensates the
   completed steps in reverse (automa's `RollbackOnError`).
-- **Finalize is the one-way line** — `Finalize` runs the held (interop) steps,
+- **Finalize is the one-way line** — `Finalize` runs the run-at-finalize (shared) steps,
   then advances the active version via `Store.SetActive` as the terminal step.
-  The advance lands only if every held step succeeds; a failure compensates and
+  The advance lands only if every run-at-finalize step succeeds; a failure compensates and
   leaves the active version unchanged.
 - **Resume after a crash** — with `WithJournal`, automa write-aheads each step,
   so a re-run resumes: completed steps are skipped, an interrupted step re-runs.

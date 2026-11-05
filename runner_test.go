@@ -54,23 +54,23 @@ func plan(t *testing.T, from, to int, migs ...migration.Migration) migration.Pla
 	return p
 }
 
-func TestRunNowExecutesHostLocal(t *testing.T) {
-	a := &fakeMig{id: "a", version: 5, scope: migration.HostLocal}
-	b := &fakeMig{id: "b", version: 6, scope: migration.Interop}
+func TestRunNowExecutesLocal(t *testing.T) {
+	a := &fakeMig{id: "a", version: 5, scope: migration.Local}
+	b := &fakeMig{id: "b", version: 6, scope: migration.Shared}
 	if err := NewRunner().RunNow(context.Background(), plan(t, 4, 6, a, b)); err != nil {
 		t.Fatalf("RunNow() error: %v", err)
 	}
 	if a.execCount != 1 {
-		t.Errorf("host-local a executed %d times, want 1", a.execCount)
+		t.Errorf("local a executed %d times, want 1", a.execCount)
 	}
 	if b.execCount != 0 {
-		t.Errorf("interop b must be held, not run now (executed %d times)", b.execCount)
+		t.Errorf("shared b must be run-at-finalize, not run now (executed %d times)", b.execCount)
 	}
 }
 
 func TestRunNowCompensatesOnFailure(t *testing.T) {
-	a := &fakeMig{id: "a", version: 5, scope: migration.HostLocal}
-	b := &fakeMig{id: "b", version: 5, scope: migration.HostLocal, execErr: errors.New("boom")}
+	a := &fakeMig{id: "a", version: 5, scope: migration.Local}
+	b := &fakeMig{id: "b", version: 5, scope: migration.Local, execErr: errors.New("boom")}
 	err := NewRunner().RunNow(context.Background(), plan(t, 4, 5, a, b))
 	if err == nil {
 		t.Fatalf("RunNow() = nil, want failure")
@@ -81,20 +81,20 @@ func TestRunNowCompensatesOnFailure(t *testing.T) {
 }
 
 func TestRunNowEmptyIsNoop(t *testing.T) {
-	b := &fakeMig{id: "b", version: 6, scope: migration.Interop}
+	b := &fakeMig{id: "b", version: 6, scope: migration.Shared}
 	if err := NewRunner().RunNow(context.Background(), plan(t, 4, 6, b)); err != nil {
-		t.Errorf("RunNow() with no host-local steps = %v, want nil", err)
+		t.Errorf("RunNow() with no local steps = %v, want nil", err)
 	}
 }
 
 func TestFinalizeRunsHeldAndAdvances(t *testing.T) {
-	b := &fakeMig{id: "b", version: 6, scope: migration.Interop}
+	b := &fakeMig{id: "b", version: 6, scope: migration.Shared}
 	store := &memStore{v: 5}
 	if err := NewRunner().Finalize(context.Background(), plan(t, 5, 6, b), store); err != nil {
 		t.Fatalf("Finalize() error: %v", err)
 	}
 	if b.execCount != 1 {
-		t.Errorf("interop b should run at finalize (executed %d times)", b.execCount)
+		t.Errorf("shared b should run at finalize (executed %d times)", b.execCount)
 	}
 	if store.Current() != 6 {
 		t.Errorf("store = %d, want 6 after finalize", store.Current())
@@ -102,8 +102,8 @@ func TestFinalizeRunsHeldAndAdvances(t *testing.T) {
 }
 
 func TestFinalizeFailureDoesNotAdvance(t *testing.T) {
-	a := &fakeMig{id: "a", version: 6, scope: migration.Interop}
-	b := &fakeMig{id: "b", version: 6, scope: migration.Interop, execErr: errors.New("boom")}
+	a := &fakeMig{id: "a", version: 6, scope: migration.Shared}
+	b := &fakeMig{id: "b", version: 6, scope: migration.Shared, execErr: errors.New("boom")}
 	store := &memStore{v: 5}
 	err := NewRunner().Finalize(context.Background(), plan(t, 5, 6, a, b), store)
 	if err == nil {
@@ -117,16 +117,16 @@ func TestFinalizeFailureDoesNotAdvance(t *testing.T) {
 	}
 }
 
-// TestFinalizeResumesAfterCrash simulates a crash: on the first Finalize, held step
+// TestFinalizeResumesAfterCrash simulates a crash: on the first Finalize, run-at-finalize step
 // "b" panics after "a" has committed (automa write-aheads "a" as completed). A
 // second Finalize with the same plan and journal resumes: "a" is skipped (already
 // done), "b" re-runs and succeeds, the remaining steps run, and the active version
 // advances.
 func TestFinalizeResumesAfterCrash(t *testing.T) {
 	journal := filepath.Join(t.TempDir(), "finalize.journal")
-	a := &fakeMig{id: "a", version: 6, scope: migration.Interop}
-	b := &fakeMig{id: "b", version: 7, scope: migration.Interop, crashOn: 1} // crash on first run
-	c := &fakeMig{id: "c", version: 8, scope: migration.Interop}
+	a := &fakeMig{id: "a", version: 6, scope: migration.Shared}
+	b := &fakeMig{id: "b", version: 7, scope: migration.Shared, crashOn: 1} // crash on first run
+	c := &fakeMig{id: "c", version: 8, scope: migration.Shared}
 	store := &memStore{v: 5}
 	runner := NewRunner(WithJournal(journal))
 
