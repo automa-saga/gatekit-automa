@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/automa-saga/automa v1.1.0
-	github.com/automa-saga/gatekit v0.5.0
+	github.com/automa-saga/gatekit v0.6.0
 )
 
 require (
