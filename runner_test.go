@@ -12,15 +12,21 @@ import (
 )
 
 // fakeMig is a test Migration. crashOn > 0 panics on that Execute call number (to
-// simulate a process crash); execErr fails every Execute.
+// simulate a process crash); execErr fails every Execute. rollErr fails every Rollback,
+// and rollCrashOn > 0 panics on that Rollback call number. reversible and readableFrom back
+// the optional Reversible/Readable interfaces.
 type fakeMig struct {
-	id        string
-	version   int
-	scope     migration.Scope
-	execErr   error
-	crashOn   int
-	execCount int
-	rollCount int
+	id           string
+	version      int
+	scope        migration.Scope
+	execErr      error
+	rollErr      error
+	crashOn      int
+	rollCrashOn  int
+	reversible   bool
+	readableFrom int
+	execCount    int
+	rollCount    int
 }
 
 func (m *fakeMig) ID() string                            { return m.id }
@@ -28,6 +34,8 @@ func (m *fakeMig) Description() string                   { return m.id }
 func (m *fakeMig) Version() int                          { return m.version }
 func (m *fakeMig) Scope() migration.Scope                { return m.scope }
 func (m *fakeMig) Applies(context.Context) (bool, error) { return true, nil }
+func (m *fakeMig) Reversible() bool                      { return m.reversible }
+func (m *fakeMig) ReadableFrom() int                     { return m.readableFrom }
 func (m *fakeMig) Execute(context.Context) error {
 	m.execCount++
 	if m.crashOn == m.execCount {
@@ -37,7 +45,10 @@ func (m *fakeMig) Execute(context.Context) error {
 }
 func (m *fakeMig) Rollback(context.Context) error {
 	m.rollCount++
-	return nil
+	if m.rollCrashOn == m.rollCount {
+		panic("gatekit-automa test: simulated crash rolling back " + m.id)
+	}
+	return m.rollErr
 }
 
 type memStore struct{ v int }
@@ -154,5 +165,114 @@ func TestFinalizeResumesAfterCrash(t *testing.T) {
 	}
 	if b.execCount < 2 {
 		t.Errorf("b executed %d times; want >=2 (crashed, then re-run on resume)", b.execCount)
+	}
+}
+
+func lowerPlan(t *testing.T, from, to, min int, migs ...migration.Migration) migration.LowerPlan {
+	t.Helper()
+	lp, err := migration.NewPlanner(migs...).PlanLower(from, to, min)
+	if err != nil {
+		t.Fatalf("PlanLower() error: %v", err)
+	}
+	return lp
+}
+
+func TestLowerRollsBackAndLowersActive(t *testing.T) {
+	a := &fakeMig{id: "a", version: 6, scope: migration.Shared, reversible: true}
+	store := &memStore{v: 6}
+	if err := NewRunner().Lower(context.Background(), lowerPlan(t, 6, 5, 0, a), store); err != nil {
+		t.Fatalf("Lower() error: %v", err)
+	}
+	if a.rollCount != 1 {
+		t.Errorf("a rolled back %d times, want 1", a.rollCount)
+	}
+	if store.Current() != 5 {
+		t.Errorf("store = %d, want 5 after lower", store.Current())
+	}
+}
+
+func TestLowerFailureLeavesActiveUnchangedAndDoesNotCompensate(t *testing.T) {
+	// Plan order is newest-first: newer rolls back, then older's rollback fails. StopOnError
+	// halts without re-applying newer (no compensation) and the advance step never runs.
+	newer := &fakeMig{id: "newer", version: 7, scope: migration.Shared, reversible: true}
+	older := &fakeMig{id: "older", version: 6, scope: migration.Shared, reversible: true, rollErr: errors.New("boom")}
+	store := &memStore{v: 7}
+	err := NewRunner().Lower(context.Background(), lowerPlan(t, 7, 5, 0, newer, older), store)
+	if err == nil {
+		t.Fatal("Lower() = nil, want failure")
+	}
+	if newer.rollCount != 1 {
+		t.Errorf("newer rolled back %d times, want 1", newer.rollCount)
+	}
+	if newer.execCount != 0 {
+		t.Errorf("newer re-executed %d times; StopOnError must not compensate a completed rollback", newer.execCount)
+	}
+	if store.Current() != 7 {
+		t.Errorf("store = %d, want 7 (unchanged) after failed lower", store.Current())
+	}
+}
+
+// TestLowerResumesAfterCrash mirrors the finalize resume test for the reverse direction:
+// "older" panics mid-rollback after "newer" has rolled back; a second Lower with the same
+// plan and journal resumes, skips the completed rollback, finishes, and lowers active.
+func TestLowerResumesAfterCrash(t *testing.T) {
+	journal := filepath.Join(t.TempDir(), "lower.journal")
+	newer := &fakeMig{id: "newer", version: 7, scope: migration.Shared, reversible: true}
+	older := &fakeMig{id: "older", version: 6, scope: migration.Shared, reversible: true, rollCrashOn: 1}
+	store := &memStore{v: 7}
+	runner := NewRunner(WithJournal(journal))
+
+	func() {
+		defer func() { _ = recover() }()
+		_ = runner.Lower(context.Background(), lowerPlan(t, 7, 5, 0, newer, older), store)
+	}()
+	if store.Current() != 7 {
+		t.Fatalf("store lowered to %d before the crash completed lower; want 7", store.Current())
+	}
+
+	if err := runner.Lower(context.Background(), lowerPlan(t, 7, 5, 0, newer, older), store); err != nil {
+		t.Fatalf("resumed Lower() error: %v", err)
+	}
+	if store.Current() != 5 {
+		t.Errorf("store = %d, want 5 after resumed lower", store.Current())
+	}
+	if newer.rollCount != 1 {
+		t.Errorf("newer rolled back %d times; want 1 (resume must skip the completed step)", newer.rollCount)
+	}
+	if older.rollCount < 2 {
+		t.Errorf("older rolled back %d times; want >=2 (crashed, then re-run on resume)", older.rollCount)
+	}
+}
+
+func TestRunNowRefusesWriteFloorBlocked(t *testing.T) {
+	a := &fakeMig{id: "a", version: 6, scope: migration.Local, readableFrom: 6}
+	p, err := migration.NewPlanner(a).WithMin(5).Plan(context.Background(), 5, 6)
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	err = NewRunner().RunNow(context.Background(), p)
+	var wf *migration.WriteFloorError
+	if !errors.As(err, &wf) {
+		t.Fatalf("RunNow() = %v, want *WriteFloorError", err)
+	}
+	if a.execCount != 0 {
+		t.Errorf("blocked step executed %d times; RunNow must refuse before executing", a.execCount)
+	}
+}
+
+func TestFinalizeRefusesWriteFloorBlocked(t *testing.T) {
+	a := &fakeMig{id: "a", version: 6, scope: migration.Shared, readableFrom: 6}
+	store := &memStore{v: 5}
+	p, err := migration.NewPlanner(a).WithMin(5).Plan(context.Background(), 5, 6)
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	err = NewRunner().Finalize(context.Background(), p, store)
+	var wf *migration.WriteFloorError
+	if !errors.As(err, &wf) {
+		t.Fatalf("Finalize() = %v, want *WriteFloorError", err)
+	}
+	if a.execCount != 0 || store.Current() != 5 {
+		t.Errorf("blocked finalize ran (execCount=%d, store=%d); must refuse before executing", a.execCount, store.Current())
 	}
 }

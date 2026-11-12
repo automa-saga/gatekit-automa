@@ -25,9 +25,12 @@ import (
 const (
 	runNowWorkflowID   = "gatekit-run-now"
 	finalizeWorkflowID = "gatekit-finalize"
+	lowerWorkflowID    = "gatekit-lower"
 	// advanceStepID is the terminal finalize step that advances the active version.
 	// It is namespaced to avoid colliding with a migration ID.
 	advanceStepID = "gatekit:advance-active"
+	// lowerAdvanceStepID is the terminal lower step that lowers the active version.
+	lowerAdvanceStepID = "gatekit:lower-active"
 )
 
 // Runner is an automa-backed migration.Runner. It executes a Plan as an automa
@@ -68,7 +71,13 @@ var _ migration.Runner = (*Runner)(nil)
 // RunNow executes the plan's run-now (local) steps as an automa saga, rolling
 // back completed steps in reverse on failure. It does not advance the active
 // version. With a journal it is crash-resumable. An empty run-now set is a no-op.
+//
+// It calls plan.CheckWriteFloor(true) first and returns, executing nothing, if a
+// run-now step is blocked by the write floor.
 func (r *Runner) RunNow(ctx context.Context, plan migration.Plan) error {
+	if err := plan.CheckWriteFloor(true); err != nil {
+		return err
+	}
 	if len(plan.RunNow()) == 0 {
 		return nil
 	}
@@ -80,8 +89,27 @@ func (r *Runner) RunNow(ctx context.Context, plan migration.Plan) error {
 // only if every run-at-finalize step succeeds (the one-way line); a failure compensates the
 // executed run-at-finalize steps and leaves the active version unchanged. With a journal it is
 // crash-resumable.
+//
+// It calls plan.CheckWriteFloor(false) first and returns, executing nothing, if a
+// run-at-finalize step is blocked by the write floor.
 func (r *Runner) Finalize(ctx context.Context, plan migration.Plan, store migration.Store) error {
+	if err := plan.CheckWriteFloor(false); err != nil {
+		return err
+	}
 	return r.run(ctx, FinalizeWorkflow(plan, store))
+}
+
+// Lower runs a LowerPlan's rollbacks as an automa saga — each step's Rollback is the
+// forward action, in plan order — then lowers the active version to plan.To via store as
+// the terminal step. Data first, active last: the active version lands only after every
+// rollback succeeds; a failure stops the workflow and leaves the active version unchanged.
+//
+// Unlike Finalize, the saga runs in StopOnError mode with no compensation: on a rollback
+// failure it stops without re-applying a migration it just rolled back. Because Rollback is
+// idempotent, re-running Lower (or resuming from a journal) completes the retreat — the same
+// recovery contract as migration.StdRunner.Lower.
+func (r *Runner) Lower(ctx context.Context, plan migration.LowerPlan, store migration.Store) error {
+	return r.run(ctx, LowerWorkflow(plan, store))
 }
 
 // run executes a workflow, resuming from the journal when one is configured.
@@ -107,7 +135,7 @@ func (r *Runner) run(ctx context.Context, wb *automa.WorkflowBuilder) error {
 // the consumer may run directly (with automa's execution modes, notifications, and
 // durability journal) instead of via Runner.
 func RunNowWorkflow(plan migration.Plan) *automa.WorkflowBuilder {
-	return workflowOf(runNowWorkflowID, stepsOf(plan.RunNow()))
+	return workflowOf(runNowWorkflowID, automa.RollbackOnError, stepsOf(plan.RunNow()))
 }
 
 // FinalizeWorkflow builds the automa workflow for the plan's run-at-finalize (shared) steps
@@ -117,18 +145,30 @@ func RunNowWorkflow(plan migration.Plan) *automa.WorkflowBuilder {
 func FinalizeWorkflow(plan migration.Plan, store migration.Store) *automa.WorkflowBuilder {
 	steps := stepsOf(plan.RunAtFinalize())
 	steps = append(steps, advanceStep(plan, store))
-	return workflowOf(finalizeWorkflowID, steps)
+	return workflowOf(finalizeWorkflowID, automa.RollbackOnError, steps)
 }
 
-// workflowOf assembles a RollbackOnError workflow from ordered step builders.
-func workflowOf(id string, steps []*automa.StepBuilder) *automa.WorkflowBuilder {
+// LowerWorkflow builds the automa workflow for a LowerPlan: each step's Rollback is the
+// forward action, in plan order, followed by a terminal step that lowers the active version
+// to plan.To via store. It runs in StopOnError mode with no compensation — on a rollback
+// failure it stops and never re-applies a migration it just rolled back — so re-running (or
+// resuming from a journal) is the recovery, matching migration.StdRunner.Lower. It is the
+// building block a consumer may run directly instead of via Runner.Lower.
+func LowerWorkflow(plan migration.LowerPlan, store migration.Store) *automa.WorkflowBuilder {
+	steps := lowerStepsOf(plan.Steps)
+	steps = append(steps, lowerAdvanceStep(plan, store))
+	return workflowOf(lowerWorkflowID, automa.StopOnError, steps)
+}
+
+// workflowOf assembles a workflow with the given execution mode from ordered step builders.
+func workflowOf(id string, mode automa.TypeMode, steps []*automa.StepBuilder) *automa.WorkflowBuilder {
 	builders := make([]automa.Builder, len(steps))
 	for i, s := range steps {
 		builders[i] = s
 	}
 	return automa.NewWorkflowBuilder().
 		WithId(id).
-		WithExecutionMode(automa.RollbackOnError).
+		WithExecutionMode(mode).
 		Steps(builders...)
 }
 
@@ -166,6 +206,43 @@ func stepFor(m migration.Migration) *automa.StepBuilder {
 func advanceStep(plan migration.Plan, store migration.Store) *automa.StepBuilder {
 	return automa.NewStepBuilder().
 		WithId(advanceStepID).
+		WithExecute(func(ctx context.Context, stp automa.Step) *automa.Report {
+			if err := store.SetActive(plan.To); err != nil {
+				return automa.FailureReport(stp, automa.WithError(err))
+			}
+			return automa.SuccessReport(stp)
+		})
+}
+
+// lowerStepsOf maps a LowerPlan's migrations to automa step builders, preserving order.
+func lowerStepsOf(migs []migration.Migration) []*automa.StepBuilder {
+	out := make([]*automa.StepBuilder, 0, len(migs))
+	for _, m := range migs {
+		out = append(out, lowerStepFor(m))
+	}
+	return out
+}
+
+// lowerStepFor maps one migration to a lowering step: its Rollback is the forward action.
+// It has no compensation — StopOnError never re-applies a completed rollback — so a failed
+// lowering leaves earlier rollbacks in place and is recovered by re-running (Rollback is
+// idempotent), not by undoing them.
+func lowerStepFor(m migration.Migration) *automa.StepBuilder {
+	return automa.NewStepBuilder().
+		WithId(m.ID()).
+		WithExecute(func(ctx context.Context, stp automa.Step) *automa.Report {
+			if err := m.Rollback(ctx); err != nil {
+				return automa.FailureReport(stp, automa.WithError(err))
+			}
+			return automa.SuccessReport(stp)
+		})
+}
+
+// lowerAdvanceStep is the terminal lower step that persists the lowered active version. It
+// runs only after every rollback step succeeds, so active lands last; it has no compensation.
+func lowerAdvanceStep(plan migration.LowerPlan, store migration.Store) *automa.StepBuilder {
+	return automa.NewStepBuilder().
+		WithId(lowerAdvanceStepID).
 		WithExecute(func(ctx context.Context, stp automa.Step) *automa.Report {
 			if err := store.SetActive(plan.To); err != nil {
 				return automa.FailureReport(stp, automa.WithError(err))

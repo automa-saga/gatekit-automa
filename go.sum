@@ -1,7 +1,7 @@
 github.com/automa-saga/automa v1.1.0 h1:c88uf/4W3sz7QNPy52SPA+Ji0HjCv02txdoFhfrS/Ec=
 github.com/automa-saga/automa v1.1.0/go.mod h1:IHVYjjri82jKo5VODY0di9W8zmjFtwmNEvoZonRU7PY=
-github.com/automa-saga/gatekit v0.5.0 h1:5/T6yjG4OP/mDHfQuncsTNYTQV0HhmhJ0a7uGjJbg14=
-github.com/automa-saga/gatekit v0.5.0/go.mod h1:Mpn25+7wMSaxSDBAzUnItfRIFBmaI7UJ0jXSLwzoqq4=
+github.com/automa-saga/gatekit v0.6.0 h1:fclynlC3LiGyFITwbquagyEWyL98Re0+kRfD0MECpxE=
+github.com/automa-saga/gatekit v0.6.0/go.mod h1:Mpn25+7wMSaxSDBAzUnItfRIFBmaI7UJ0jXSLwzoqq4=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
