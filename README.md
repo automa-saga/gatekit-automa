@@ -69,7 +69,14 @@ with automa's own execution modes, notifications, and journal.
 ## Version pinning
 
 This module tracks tagged `gatekit` releases; it currently requires `gatekit`
-`v0.6.0` (the release that adds `Runner.Lower` and the write floor).
+`v0.7.0`. The `migration.Runner` interface it implements — including `Lower` and the
+write-floor preflight — has been stable since `v0.6.0`.
+
+**Compatibility is the `require` above, not a version table.** `go get` resolves a working
+gatekit + gatekit-automa pair and a mismatch is a compile error. Use the gatekit-automa
+release built for your gatekit version. The version numbers of the two modules are
+independent (each is cut by semantic-release from its own commits); a new gatekit-automa
+release follows each gatekit release that changes `migration.Runner`.
 
 ## Development
 
